@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>QRスキャナー</title>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --primary: #4285f4;
+      --success: #34a853;
+      --warn: #c83232;
+      --bg: #0a0a0a;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Noto Sans JP', sans-serif;
+      background: var(--bg); color: white;
+      height: 100vh; height: 100dvh;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+      user-select: none; -webkit-user-select: none;
+      -webkit-touch-callout: none; touch-action: manipulation;
+    }
+
+    /* ===== 設定パネル ===== */
+    #setup-panel {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      flex: 1; padding: 30px 20px; gap: 20px;
+    }
+    #setup-panel h1 { font-size: 22px; text-align: center; }
+    #setup-panel .desc { font-size: 14px; color: #999; text-align: center; line-height: 1.6; }
+    .setup-form { width: 100%; max-width: 400px; display: flex; flex-direction: column; gap: 15px; }
+    .setup-form label { font-size: 13px; color: #aaa; font-weight: bold; }
+    .setup-form input, .setup-form select {
+      width: 100%; padding: 14px; border: 1px solid #333; border-radius: 10px;
+      background: #1a1a1a; color: white; font-size: 16px; font-family: inherit;
+      -webkit-appearance: none; appearance: none;
+    }
+    .setup-form input:focus, .setup-form select:focus { outline: none; border-color: var(--primary); }
+    .btn-start {
+      background: var(--primary); color: white; border: none;
+      padding: 16px; border-radius: 12px; font-size: 18px; font-weight: bold;
+      cursor: pointer; font-family: inherit;
+    }
+    .btn-start:disabled { background: #333; color: #666; }
+    .saved-url { font-size: 12px; color: #666; word-break: break-all; text-align: center; }
+
+    /* ===== スキャン画面 ===== */
+    #scan-panel { display: none; flex: 1; flex-direction: column; position: relative; }
+    #scan-header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 10px 15px; background: rgba(0,0,0,0.8); z-index: 10;
+    }
+    #scan-header .date-label { font-size: 14px; font-weight: bold; }
+    #scan-header .status-badge {
+      font-size: 12px; padding: 4px 10px; border-radius: 20px;
+      background: var(--success); font-weight: bold;
+    }
+    .btn-back {
+      background: #333; border: none; color: white; padding: 8px 14px;
+      border-radius: 8px; font-size: 14px; cursor: pointer; font-family: inherit;
+    }
+
+    #camera-area { flex: 1; position: relative; background: black; overflow: hidden; }
+    #camera-area video { width: 100%; height: 100%; object-fit: cover; }
+    .scan-guide {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      border: 4px solid rgba(0, 255, 0, 0.6); width: 220px; height: 220px;
+      border-radius: 20px; box-shadow: 0 0 0 9999px rgba(0,0,0,0.5);
+      pointer-events: none; z-index: 5;
+    }
+
+    /* 結果オーバーレイ */
+    #result-overlay {
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      display: flex; flex-direction: column; justify-content: center; align-items: center;
+      z-index: 200; opacity: 0; pointer-events: none;
+      transition: opacity 0.15s; text-align: center;
+    }
+    #result-overlay.show { opacity: 1; }
+    #result-icon { font-size: 90px; margin-bottom: 10px; }
+    #result-name { font-size: 40px; font-weight: bold; }
+    #result-task { font-size: 26px; margin-top: 10px; }
+
+    /* 送信インジケーター */
+    #save-indicator {
+      position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,0.85); color: white;
+      padding: 10px 24px; border-radius: 30px; font-size: 14px; font-weight: bold;
+      pointer-events: none; opacity: 0; transition: opacity 0.3s;
+      z-index: 1000; white-space: nowrap;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+    }
+    #save-indicator.show { opacity: 1; }
+    #save-indicator.error { background: #d32f2f; pointer-events: auto; cursor: pointer; }
+
+    /* カウンター */
+    #scan-counter {
+      position: fixed; bottom: 70px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,0.7); padding: 6px 16px; border-radius: 20px;
+      font-size: 13px; color: #ccc; z-index: 100;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ===== 設定画面 ===== -->
+<div id="setup-panel">
+  <h1>📷 QRスキャナー</h1>
+  <p class="desc">GASのWebアプリURL（doPost用）と<br>日付を設定してスキャン開始</p>
+  <div class="setup-form">
+    <div>
+      <label>GAS WebアプリURL</label>
+      <input type="url" id="gas-url" placeholder="https://script.google.com/macros/s/.../exec">
+    </div>
+    <div>
+      <label>対象日付</label>
+      <input type="date" id="scan-date">
+    </div>
+    <button class="btn-start" id="btn-start" onclick="startScanning()" disabled>スキャン開始</button>
+    <p class="saved-url" id="saved-url-display"></p>
+  </div>
+</div>
+
+<!-- ===== スキャン画面 ===== -->
+<div id="scan-panel">
+  <div id="scan-header">
+    <button class="btn-back" onclick="backToSetup()">← 設定</button>
+    <span class="date-label" id="date-display"></span>
+    <span class="status-badge" id="status-badge">接続中...</span>
+  </div>
+  <div id="camera-area">
+    <video id="video" autoplay muted playsinline></video>
+    <div class="scan-guide"></div>
+    <div id="result-overlay">
+      <div id="result-icon"></div>
+      <div id="result-name"></div>
+      <div id="result-task"></div>
+    </div>
+  </div>
+  <div id="scan-counter">スキャン: <span id="counter-num">0</span>件</div>
+</div>
+
+<div id="save-indicator"></div>
+
+<script>
+  // ===== 状態管理 =====
+  let gasUrl = '';
+  let scanDate = '';
+  let isScanning = false;
+  let currentStream = null;
+  let scanCount = 0;
+  let lastScanData = '';
+  let lastScanTime = 0;
+  let pendingQueue = [];
+  let isSyncing = false;
+  let retryCount = 0;
+  const MAX_RETRY = 5;
+
+  const video = document.getElementById('video');
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+
+  // ===== 初期化 =====
+  (function init() {
+    // 日付を今日にセット
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const d = String(now.getDate()).padStart(2, '0');
+    document.getElementById('scan-date').value = `${y}-${m}-${d}`;
+
+    // 保存済みURLを復元
+    const saved = localStorage.getItem('gas_url');
+    if (saved) {
+      document.getElementById('gas-url').value = saved;
+      document.getElementById('saved-url-display').textContent = '前回のURLを復元しました';
+    }
+    checkReady();
+  })();
+
+  // 入力チェック
+  document.getElementById('gas-url').addEventListener('input', checkReady);
+  document.getElementById('scan-date').addEventListener('input', checkReady);
+
+  function checkReady() {
+    const url = document.getElementById('gas-url').value.trim();
+    const date = document.getElementById('scan-date').value;
+    document.getElementById('btn-start').disabled = !(url && date);
+  }
+
+  // ===== スキャン開始 =====
+  function startScanning() {
+    gasUrl = document.getElementById('gas-url').value.trim();
+    scanDate = document.getElementById('scan-date').value;
+
+    // URLを保存
+    localStorage.setItem('gas_url', gasUrl);
+
+    // 日付表示
+    const parts = scanDate.split('-');
+    document.getElementById('date-display').textContent =
+      `${parseInt(parts[1])}月${parseInt(parts[2])}日`;
+
+    // 画面切替
+    document.getElementById('setup-panel').style.display = 'none';
+    document.getElementById('scan-panel').style.display = 'flex';
+
+    scanCount = 0;
+    document.getElementById('counter-num').textContent = '0';
+
+    // カメラ起動
+    startCamera();
+
+    // 接続テスト（生徒・課題データ取得）
+    fetchMasterData();
+  }
+
+  function backToSetup() {
+    stopCamera();
+    document.getElementById('scan-panel').style.display = 'none';
+    document.getElementById('setup-panel').style.display = 'flex';
+
+    if (pendingQueue.length > 0) {
+      alert(`未送信データが${pendingQueue.length}件あります。送信完了まで待つことを推奨します。`);
+      // 戻っても送信は続行
+    }
+  }
+
+  // ===== マスタデータ取得 =====
+  let localStudents = [];
+  let localTasks = [];
+  let localStatus = {};
+
+  function fetchMasterData() {
+    const badge = document.getElementById('status-badge');
+    badge.textContent = '接続中...';
+    badge.style.background = '#f9a825';
+
+    fetch(gasUrl + '?action=getDashboard&date=' + scanDate)
+      .then(r => r.json())
+      .then(data => {
+        localStudents = data.students || [];
+        localTasks = data.tasks || [];
+        localStatus = data.statusMap || {};
+        badge.textContent = `${localStudents.length}名 ${localTasks.length}課題`;
+        badge.style.background = 'var(--success)';
+      })
+      .catch(err => {
+        console.error('Master data fetch failed:', err);
+        badge.textContent = 'データ取得失敗';
+        badge.style.background = '#d32f2f';
+      });
+  }
+
+  // ===== カメラ =====
+  function startCamera() {
+    stopCamera();
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+    }).then(stream => {
+      currentStream = stream;
+      video.srcObject = stream;
+      video.play();
+      isScanning = true;
+      requestAnimationFrame(tick);
+    }).catch(err => {
+      alert('カメラ起動エラー: ' + err.message);
+    });
+  }
+
+  function stopCamera() {
+    isScanning = false;
+    if (currentStream) {
+      currentStream.getTracks().forEach(t => t.stop());
+      currentStream = null;
+    }
+    video.srcObject = null;
+  }
+
+  function tick() {
+    if (!isScanning) return;
+    if (video.readyState === video.HAVE_ENOUGH_DATA) {
+      canvas.height = video.videoHeight;
+      canvas.width = video.videoWidth;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const code = jsQR(
+        ctx.getImageData(0, 0, canvas.width, canvas.height).data,
+        canvas.width, canvas.height
+      );
+      if (code && code.data.includes('.')) {
+        handleScan(code.data);
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // ===== スキャン処理（ローカル判定 → キュー送信） =====
+  function handleScan(data) {
+    const now = Date.now();
+    if (data === lastScanData && now - lastScanTime < 1500) return;
+
+    const parts = data.split('.');
+    if (parts.length < 2) return;
+    const sId = parts[0], tId = parts[1];
+
+    const student = localStudents.find(s => s.id == sId);
+    const task = localTasks.find(t => t.id == tId);
+
+    if (!student || !task) {
+      showOverlay('⚠️', '未登録QR', 'マスタにありません', 'rgba(200,50,50,0.9)');
+      lastScanData = data; lastScanTime = now;
+      return;
+    }
+
+    const key = `${sId}_${tId}`;
+    const currentSt = localStatus[key] || '未提出';
+
+    if (currentSt === '提出済' || currentSt === '再提出済') {
+      showOverlay('⚠️', student.name, `${task.name}\n【提出済みです】`, 'rgba(66,133,244,0.9)');
+      lastScanData = data; lastScanTime = now;
+      return;
+    }
+
+    // ローカル更新
+    localStatus[key] = '提出済';
+    scanCount++;
+    document.getElementById('counter-num').textContent = scanCount;
+
+    showOverlay('✅', student.name, `${task.name}\n受付しました`, 'rgba(52,168,83,0.9)');
+
+    // キューに追加
+    pendingQueue.push({
+      date: scanDate,
+      sId: student.id,
+      sName: student.name,
+      tId: task.id,
+      tName: task.name,
+      status: '提出済'
+    });
+    processQueue();
+
+    lastScanData = data; lastScanTime = now;
+  }
+
+  function showOverlay(icon, name, msg, color) {
+    const overlay = document.getElementById('result-overlay');
+    document.getElementById('result-icon').textContent = icon;
+    document.getElementById('result-name').textContent = name;
+    document.getElementById('result-task').textContent = msg;
+    overlay.style.backgroundColor = color;
+    overlay.classList.add('show');
+    setTimeout(() => overlay.classList.remove('show'), 1200);
+  }
+
+  // ===== 送信キュー =====
+  function processQueue() {
+    if (isSyncing || pendingQueue.length === 0) {
+      updateIndicator();
+      return;
+    }
+    isSyncing = true;
+    updateIndicator();
+
+    const batch = [...pendingQueue];
+    pendingQueue = [];
+
+    fetch(gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ action: 'batchLog', logs: batch })
+    })
+    .then(r => r.json())
+    .then(res => {
+      if (res.success) {
+        retryCount = 0;
+      } else {
+        pendingQueue = [...batch, ...pendingQueue];
+        retryCount++;
+      }
+      isSyncing = false;
+      scheduleRetry();
+    })
+    .catch(err => {
+      console.error('Send error:', err);
+      pendingQueue = [...batch, ...pendingQueue];
+      retryCount++;
+      isSyncing = false;
+      scheduleRetry();
+    });
+  }
+
+  function scheduleRetry() {
+    if (pendingQueue.length === 0) {
+      retryCount = 0;
+      updateIndicator();
+      return;
+    }
+    if (retryCount >= MAX_RETRY) {
+      const el = document.getElementById('save-indicator');
+      el.textContent = `⚠️ 保存失敗（${pendingQueue.length}件）タップで再試行`;
+      el.classList.add('show', 'error');
+      el.onclick = () => {
+        retryCount = 0;
+        el.classList.remove('error');
+        el.onclick = null;
+        processQueue();
+      };
+      return;
+    }
+    const delay = Math.min(1000 * Math.pow(2, retryCount), 30000);
+    setTimeout(() => processQueue(), delay);
+  }
+
+  function updateIndicator() {
+    const el = document.getElementById('save-indicator');
+    if (pendingQueue.length > 0 || isSyncing) {
+      el.textContent = `⏳ 保存中... 残り${pendingQueue.length}件`;
+      el.classList.add('show');
+      el.classList.remove('error');
+    } else {
+      el.textContent = '💾 保存完了';
+      el.classList.add('show');
+      setTimeout(() => el.classList.remove('show'), 2000);
+    }
+  }
+
+  // ページ離脱警告
+  window.addEventListener('beforeunload', e => {
+    if (pendingQueue.length > 0) {
+      e.preventDefault();
+      e.returnValue = '未保存のデータがあります。';
+    }
+  });
+</script>
+</body>
+</html>
