@@ -92,7 +92,7 @@
     #result-icon { font-size: 84px; margin-bottom: 6px; line-height: 1; }
     #result-name { font-size: 40px; font-weight: bold; line-height: 1.2; }
     #result-task { font-size: 24px; margin-top: 12px; white-space: pre-line; word-break: break-word; line-height: 1.45; }
-    /* 補足行（のこり／うけつけずみ など） */
+    /* 補足行（のこり／ぜんぶそろいました など） */
     #result-sub { font-size: 26px; margin-top: 14px; font-weight: bold; white-space: pre-line; line-height: 1.4;
                   background: rgba(0,0,0,0.28); padding: 8px 18px; border-radius: 12px; }
     #result-sub:empty { display: none; }
@@ -278,7 +278,10 @@
         localStudents = data.students || [];
         localTasks = data.tasks || [];
         localStatus = data.statusMap || {};
-        badge.textContent = `${localStudents.length}名 ${localTasks.length}課題`;
+        // 必須課題の数を表示（任意課題は別カウント）
+        const required = localTasks.filter(t => !t.optional).length;
+        const optional = localTasks.length - required;
+        badge.textContent = `${localStudents.length}名 ${required}課題` + (optional > 0 ? ` +任意${optional}` : '');
         badge.style.background = 'var(--success)';
       })
       .catch(err => {
@@ -382,11 +385,23 @@
     return { type: 'accepted', student: student, task: task };
   }
 
-  // その児童の「まだ出ていない課題名」の配列（提出不要は除く）
+  // ▼ その児童の「まだ出ていない必須課題名」の配列
+  //   任意課題（自主勉強など）と提出不要は除外するので、
+  //   必須が揃えば「ぜんぶ そろいました！」になる
   function getRemainingTasks(sId) {
     return localTasks.filter(t => {
+      if (t.optional) return false; // 任意課題は「のこり」に数えない
       const st = localStatus[`${sId}_${t.id}`] || '未提出';
       return st !== '提出不要' && st !== '提出済' && st !== '再提出済';
+    }).map(t => t.name);
+  }
+
+  // その児童がこの日に出した任意課題（自主勉強など）の名前
+  function getDoneOptionalTasks(sId) {
+    return localTasks.filter(t => {
+      if (!t.optional) return false;
+      const st = localStatus[`${sId}_${t.id}`] || '未提出';
+      return st === '提出済' || st === '再提出済';
     }).map(t => t.name);
   }
 
@@ -419,19 +434,25 @@
     const byStudent = new Map();
     accepted.forEach(r => {
       if (!byStudent.has(r.student.id)) byStudent.set(r.student.id, { student: r.student, tasks: [] });
-      byStudent.get(r.student.id).tasks.push(r.task.name);
+      byStudent.get(r.student.id).tasks.push(r.task);
     });
 
     const extraNote = already.length > 0 ? `\n（${already.length}こは うけつけずみ）` : '';
 
-    // ▼ 1人だけの場合：課題名を並べ、全部そろったかを大きく表示
+    // ▼ 1人だけの場合：課題名を並べ、必須が全部そろったかを大きく表示
     if (byStudent.size === 1) {
       const e = [...byStudent.values()][0];
       const remain = getRemainingTasks(e.student.id);
-      const taskLine = e.tasks.join('・') + `　${e.tasks.length}こ うけつけ` + extraNote;
+      const doneOptional = getDoneOptionalTasks(e.student.id);
+      // 任意課題には⭐を付けて区別
+      const taskLine = e.tasks.map(t => t.optional ? '⭐' + t.name : t.name).join('・')
+        + `　${e.tasks.length}こ うけつけ` + extraNote;
 
       if (remain.length === 0) {
-        showOverlay('🎉', e.student.name + ' さん', taskLine, 'ぜんぶ そろいました！', COLOR_DONE, false, 2200);
+        const sub = doneOptional.length > 0
+          ? 'ぜんぶ そろいました！\n⭐' + doneOptional.join('・') + ' も バッチリ'
+          : 'ぜんぶ そろいました！';
+        showOverlay('🎉', e.student.name + ' さん', taskLine, sub, COLOR_DONE, false, 2400);
       } else {
         showOverlay('✅', e.student.name + ' さん', taskLine, 'のこり：' + remain.join('・'), COLOR_OK, false, 2400);
       }
@@ -439,11 +460,13 @@
     }
 
     // ▼ 複数人の場合：名前ごとに「ぜんぶ／のこり◯」を一覧表示
-    const lines = [...byStudent.values()].map(e => {
+    const entries = [...byStudent.values()];
+    const lines = entries.map(e => {
       const remain = getRemainingTasks(e.student.id);
-      return `${e.student.name}（${remain.length === 0 ? 'ぜんぶ' : 'のこり' + remain.length}）`;
+      const star = getDoneOptionalTasks(e.student.id).length > 0 ? '⭐' : '';
+      return `${e.student.name}（${remain.length === 0 ? 'ぜんぶ' + star : 'のこり' + remain.length}）`;
     });
-    const allComplete = [...byStudent.values()].every(e => getRemainingTasks(e.student.id).length === 0);
+    const allComplete = entries.every(e => getRemainingTasks(e.student.id).length === 0);
     showOverlay(allComplete ? '🎉' : '✅', `${byStudent.size}名 うけつけました`,
       lines.join('　') + extraNote,
       allComplete ? 'ぜんぶ そろいました！' : '',
