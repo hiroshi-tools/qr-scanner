@@ -89,12 +89,17 @@
       transition: opacity 0.15s; text-align: center; padding: 0 15px;
     }
     #result-overlay.show { opacity: 1; }
-    #result-icon { font-size: 90px; margin-bottom: 10px; }
-    #result-name { font-size: 40px; font-weight: bold; }
-    #result-task { font-size: 26px; margin-top: 10px; white-space: pre-line; word-break: break-word; }
+    #result-icon { font-size: 84px; margin-bottom: 6px; line-height: 1; }
+    #result-name { font-size: 40px; font-weight: bold; line-height: 1.2; }
+    #result-task { font-size: 24px; margin-top: 12px; white-space: pre-line; word-break: break-word; line-height: 1.45; }
+    /* 補足行（のこり／うけつけずみ など） */
+    #result-sub { font-size: 26px; margin-top: 14px; font-weight: bold; white-space: pre-line; line-height: 1.4;
+                  background: rgba(0,0,0,0.28); padding: 8px 18px; border-radius: 12px; }
+    #result-sub:empty { display: none; }
     /* 複数名同時受付時はやや小さく表示 */
-    #result-overlay.multi #result-name { font-size: 34px; }
-    #result-overlay.multi #result-task { font-size: 22px; }
+    #result-overlay.multi #result-name { font-size: 32px; }
+    #result-overlay.multi #result-task { font-size: 21px; }
+    #result-overlay.multi #result-sub { font-size: 21px; }
 
     /* 送信インジケーター */
     #save-indicator {
@@ -154,6 +159,7 @@
       <div id="result-icon"></div>
       <div id="result-name"></div>
       <div id="result-task"></div>
+      <div id="result-sub"></div>
     </div>
   </div>
   <div id="scan-counter">スキャン: <span id="counter-num">0</span>件</div>
@@ -173,10 +179,16 @@
   let isSyncing = false;
   let retryCount = 0;
   let decoding = false;
+  let overlayTimer = null;
   const MAX_RETRY = 5;
   // QR文字列ごとの最終読取時刻（複数QR対応のためMap管理）
   const scanCooldown = new Map();
   const COOLDOWN_MS = 1500;
+
+  const COLOR_DONE  = 'rgba(46,125,50,0.94)';   // ぜんぶそろった（濃い緑）
+  const COLOR_OK    = 'rgba(21,101,192,0.94)';  // 受付したが残りあり（青）
+  const COLOR_INFO  = 'rgba(66,133,244,0.92)';  // すでに提出済み
+  const COLOR_ERR   = 'rgba(200,50,50,0.92)';   // 未登録QR
 
   const video = document.getElementById('video');
   const canvas = document.createElement('canvas');
@@ -184,27 +196,22 @@
 
   // ===== 初期化 =====
   (function init() {
-    // 日付を今日にセット
     const now = new Date();
     const y = now.getFullYear();
     const m = String(now.getMonth() + 1).padStart(2, '0');
     const d = String(now.getDate()).padStart(2, '0');
     document.getElementById('scan-date').value = `${y}-${m}-${d}`;
 
-    // 保存済みURL・トークンを復元
     const saved = localStorage.getItem('gas_url');
     if (saved) {
       document.getElementById('gas-url').value = saved;
       document.getElementById('saved-url-display').textContent = '前回のURLを復元しました';
     }
     const savedToken = localStorage.getItem('gas_token');
-    if (savedToken) {
-      document.getElementById('gas-token').value = savedToken;
-    }
+    if (savedToken) document.getElementById('gas-token').value = savedToken;
     checkReady();
   })();
 
-  // 入力チェック
   document.getElementById('gas-url').addEventListener('input', checkReady);
   document.getElementById('scan-date').addEventListener('input', checkReady);
 
@@ -220,16 +227,13 @@
     gasToken = document.getElementById('gas-token').value.trim();
     scanDate = document.getElementById('scan-date').value;
 
-    // URL・トークンを保存
     localStorage.setItem('gas_url', gasUrl);
     localStorage.setItem('gas_token', gasToken);
 
-    // 日付表示
     const parts = scanDate.split('-');
     document.getElementById('date-display').textContent =
       `${parseInt(parts[1])}月${parseInt(parts[2])}日`;
 
-    // 画面切替
     document.getElementById('setup-panel').style.display = 'none';
     document.getElementById('scan-panel').style.display = 'flex';
 
@@ -237,10 +241,7 @@
     scanCooldown.clear();
     document.getElementById('counter-num').textContent = '0';
 
-    // カメラ起動
     startCamera();
-
-    // 接続テスト（生徒・課題データ取得）
     fetchMasterData();
   }
 
@@ -248,10 +249,8 @@
     stopCamera();
     document.getElementById('scan-panel').style.display = 'none';
     document.getElementById('setup-panel').style.display = 'flex';
-
     if (pendingQueue.length > 0) {
       alert(`未送信データが${pendingQueue.length}件あります。送信完了まで待つことを推奨します。`);
-      // 戻っても送信は続行
     }
   }
 
@@ -293,7 +292,6 @@
   function startCamera() {
     stopCamera();
     navigator.mediaDevices.getUserMedia({
-      // 複数QR認識率向上のため高解像度を要求
       video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }
     }).then(stream => {
       currentStream = stream;
@@ -329,20 +327,17 @@
           { formats: ['QRCode'], maxNumberOfSymbols: 8 }
         );
 
-        const accepted = [];
+        const classified = [];
         for (const r of results) {
           if (!r.text || !r.text.includes('.')) continue;
-          const res = handleScan(r.text);
-          if (res) accepted.push(res);
+          const c = classifyScan(r.text);
+          if (c) classified.push(c);
         }
 
-        // 受付結果をまとめて表示（複数同時ヒット時の上書き合戦を防止）
-        if (accepted.length === 1) {
-          showOverlay('✅', accepted[0].name, `${accepted[0].task}\n受付しました`, 'rgba(52,168,83,0.9)', false);
-        } else if (accepted.length > 1) {
-          showOverlay('✅', `${accepted.length}名 受付しました`, accepted.map(a => a.name).join('・'), 'rgba(52,168,83,0.9)', true);
+        if (classified.length > 0) {
+          showScanResult(classified);
+          if (classified.some(c => c.type === 'accepted')) processQueue();
         }
-        if (accepted.length > 0) processQueue();
       } catch (e) {
         // デコード失敗は無視して次フレームへ
       }
@@ -351,9 +346,9 @@
     requestAnimationFrame(tick);
   }
 
-  // ===== スキャン処理（ローカル判定 → キュー追加）=====
-  // 戻り値: 受付成功なら {name, task}、それ以外は null
-  function handleScan(data) {
+  // ===== 1件ごとの判定（表示はまとめて行うのでここでは出さない） =====
+  // 戻り値: { type: 'accepted' | 'already' | 'unknown', student?, task? }
+  function classifyScan(data) {
     const now = Date.now();
     if (now - (scanCooldown.get(data) || 0) < COOLDOWN_MS) return null;
     scanCooldown.set(data, now);
@@ -364,26 +359,18 @@
 
     const student = localStudents.find(s => s.id == sId);
     const task = localTasks.find(t => t.id == tId);
-
-    if (!student || !task) {
-      showOverlay('⚠️', '未登録QR', 'マスタにありません', 'rgba(200,50,50,0.9)', false);
-      return null;
-    }
+    if (!student || !task) return { type: 'unknown' };
 
     const key = `${sId}_${tId}`;
     const currentSt = localStatus[key] || '未提出';
-
     if (currentSt === '提出済' || currentSt === '再提出済') {
-      showOverlay('⚠️', student.name, `${task.name}\n【提出済みです】`, 'rgba(66,133,244,0.9)', false);
-      return null;
+      return { type: 'already', student: student, task: task };
     }
 
-    // ローカル更新
+    // 受付：ローカル更新＋送信キューへ
     localStatus[key] = '提出済';
     scanCount++;
     document.getElementById('counter-num').textContent = scanCount;
-
-    // キューに追加（送信はtick側でまとめて1回）
     pendingQueue.push({
       date: scanDate,
       sId: student.id,
@@ -392,19 +379,88 @@
       tName: task.name,
       status: '提出済'
     });
-
-    return { name: student.name, task: task.name };
+    return { type: 'accepted', student: student, task: task };
   }
 
-  function showOverlay(icon, name, msg, color, isMulti) {
+  // その児童の「まだ出ていない課題名」の配列（提出不要は除く）
+  function getRemainingTasks(sId) {
+    return localTasks.filter(t => {
+      const st = localStatus[`${sId}_${t.id}`] || '未提出';
+      return st !== '提出不要' && st !== '提出済' && st !== '再提出済';
+    }).map(t => t.name);
+  }
+
+  // ===== 判定結果をまとめて1つのメッセージに =====
+  function showScanResult(list) {
+    const accepted = list.filter(r => r.type === 'accepted');
+    const already  = list.filter(r => r.type === 'already');
+    const unknown  = list.filter(r => r.type === 'unknown');
+
+    // 受付が1件もない場合
+    if (accepted.length === 0) {
+      if (already.length > 0) {
+        const names = [...new Set(already.map(r => r.student.name))];
+        const tasks = already.map(r => r.task.name).join('・');
+        if (names.length === 1) {
+          const remain = getRemainingTasks(already[0].student.id);
+          showOverlay('⚠️', names[0] + ' さん', tasks,
+            remain.length === 0 ? 'ぜんぶ うけつけずみ です' : 'うけつけずみ\nのこり：' + remain.join('・'),
+            COLOR_INFO, false, 1800);
+        } else {
+          showOverlay('⚠️', 'うけつけずみ です', names.join('・'), '', COLOR_INFO, true, 1600);
+        }
+      } else if (unknown.length > 0) {
+        showOverlay('⚠️', 'よみとれません', 'この QRコードは とうろく されていません', '', COLOR_ERR, false, 1600);
+      }
+      return;
+    }
+
+    // 受付を児童ごとにまとめる
+    const byStudent = new Map();
+    accepted.forEach(r => {
+      if (!byStudent.has(r.student.id)) byStudent.set(r.student.id, { student: r.student, tasks: [] });
+      byStudent.get(r.student.id).tasks.push(r.task.name);
+    });
+
+    const extraNote = already.length > 0 ? `\n（${already.length}こは うけつけずみ）` : '';
+
+    // ▼ 1人だけの場合：課題名を並べ、全部そろったかを大きく表示
+    if (byStudent.size === 1) {
+      const e = [...byStudent.values()][0];
+      const remain = getRemainingTasks(e.student.id);
+      const taskLine = e.tasks.join('・') + `　${e.tasks.length}こ うけつけ` + extraNote;
+
+      if (remain.length === 0) {
+        showOverlay('🎉', e.student.name + ' さん', taskLine, 'ぜんぶ そろいました！', COLOR_DONE, false, 2200);
+      } else {
+        showOverlay('✅', e.student.name + ' さん', taskLine, 'のこり：' + remain.join('・'), COLOR_OK, false, 2400);
+      }
+      return;
+    }
+
+    // ▼ 複数人の場合：名前ごとに「ぜんぶ／のこり◯」を一覧表示
+    const lines = [...byStudent.values()].map(e => {
+      const remain = getRemainingTasks(e.student.id);
+      return `${e.student.name}（${remain.length === 0 ? 'ぜんぶ' : 'のこり' + remain.length}）`;
+    });
+    const allComplete = [...byStudent.values()].every(e => getRemainingTasks(e.student.id).length === 0);
+    showOverlay(allComplete ? '🎉' : '✅', `${byStudent.size}名 うけつけました`,
+      lines.join('　') + extraNote,
+      allComplete ? 'ぜんぶ そろいました！' : '',
+      allComplete ? COLOR_DONE : COLOR_OK, true, 2400);
+  }
+
+  function showOverlay(icon, name, msg, sub, color, isMulti, duration) {
     const overlay = document.getElementById('result-overlay');
     document.getElementById('result-icon').textContent = icon;
     document.getElementById('result-name').textContent = name;
     document.getElementById('result-task').textContent = msg;
+    document.getElementById('result-sub').textContent = sub || '';
     overlay.style.backgroundColor = color;
     overlay.classList.toggle('multi', !!isMulti);
     overlay.classList.add('show');
-    setTimeout(() => overlay.classList.remove('show'), 1200);
+    if (overlayTimer) clearTimeout(overlayTimer);
+    overlayTimer = setTimeout(() => overlay.classList.remove('show'), duration || 1600);
   }
 
   // ===== 送信キュー =====
